@@ -43,6 +43,7 @@ type flags struct {
 	envoyGatewayNamespace          string
 	extProcLogLevel                string
 	extProcLogFormat               string
+	extProcFalURLScheme            string
 	logFormat                      string
 	extProcEnableRedaction         bool
 	extProcImage                   string
@@ -72,6 +73,10 @@ type flags struct {
 	mcpFallbackSessionEncryptionSeed       string
 	mcpSessionEncryptionIterations         int
 	mcpFallbackSessionEncryptionIterations int
+	fileIDEncryptionSeed                   string
+	fileIDEncryptionIterations             int
+	fileIDFallbackEncryptionSeed           string
+	fileIDFallbackEncryptionIterations     int
 	watchNamespaces                        []string
 	cacheSyncTimeout                       time.Duration
 	credentialPreRotationWindow            time.Duration
@@ -136,6 +141,12 @@ const (
 	// mcpFallbackSessionEncryptionSeedEnvVar is the environment variable to read the MCP fallback session
 	// encryption seed from when the mcpFallbackSessionEncryptionSeed flag is not set.
 	mcpFallbackSessionEncryptionSeedEnvVar = "MCP_FALLBACK_SESSION_ENCRYPTION_SEED"
+	// fileIDEncryptionSeedEnvVar is the environment variable to read the Files/Batch API id encryption
+	// seed from when the fileIDEncryptionSeed flag is not set.
+	fileIDEncryptionSeedEnvVar = "FILE_ID_ENCRYPTION_SEED"
+	// fileIDFallbackEncryptionSeedEnvVar is the environment variable to read the Files/Batch API id
+	// fallback encryption seed from when the fileIDFallbackEncryptionSeed flag is not set.
+	fileIDFallbackEncryptionSeedEnvVar = "FILE_ID_FALLBACK_ENCRYPTION_SEED"
 )
 
 // parseAndValidateFlags parses the command-line arguments provided in args,
@@ -157,6 +168,11 @@ func parseAndValidateFlags(args []string) (*flags, error) {
 		"extProcLogFormat",
 		internalapi.LogFormatText,
 		"The log output format for the external processor. One of 'text' or 'json'.",
+	)
+	extProcFalURLSchemePtr := fs.String(
+		"extProcFalURLScheme",
+		"",
+		"The scheme of the gateway URLs that replace fal URLs in fal responses. One of 'https' or 'http'. Empty uses the request's x-forwarded-proto, else its :scheme.",
 	)
 	extProcEnableRedactionPtr := fs.Bool(
 		"extProcEnableRedaction",
@@ -241,7 +257,7 @@ func parseAndValidateFlags(args []string) (*flags, error) {
 	endpointPrefixes := fs.String(
 		"endpointPrefixes",
 		"",
-		"Comma-separated key-value pairs for endpoint prefixes. Format: openai:/,cohere:/cohere,anthropic:/anthropic,typesafe:/typesafe.",
+		"Comma-separated key-value pairs for endpoint prefixes. Format: openai:/,cohere:/cohere,anthropic:/anthropic,typesafe:/typesafe,fal:/fal.",
 	)
 	rootPrefix := fs.String(
 		"rootPrefix",
@@ -293,6 +309,16 @@ func parseAndValidateFlags(args []string) (*flags, error) {
 			"Prefer the "+mcpFallbackSessionEncryptionSeedEnvVar+" environment variable to keep it out of the process command line.")
 	mcpFallbackSessionEncryptionIterations := fs.Int("mcpFallbackSessionEncryptionIterations", 100_000,
 		"Number of iterations used in the fallback PBKDF2 key derivation for MCP session encryption.")
+	fileIDEncryptionSeed := fs.String("fileIDEncryptionSeed", "default-insecure-seed",
+		"Seed used to derive the Files/Batch API id encryption key. This should be changed and set to a secure value. "+
+			"Prefer the "+fileIDEncryptionSeedEnvVar+" environment variable to keep it out of the process command line.")
+	fileIDEncryptionIterations := fs.Int("fileIDEncryptionIterations", 100_000,
+		"Number of iterations to use for PBKDF2 key derivation for Files/Batch API id encryption.")
+	fileIDFallbackEncryptionSeed := fs.String("fileIDFallbackEncryptionSeed", "",
+		"Optional fallback seed used for Files/Batch API id key rotation. "+
+			"Prefer the "+fileIDFallbackEncryptionSeedEnvVar+" environment variable to keep it out of the process command line.")
+	fileIDFallbackEncryptionIterations := fs.Int("fileIDFallbackEncryptionIterations", 100_000,
+		"Number of iterations used in the fallback PBKDF2 key derivation for Files/Batch API id encryption.")
 	quotaRateLimitServiceAddr := fs.String("quotaRateLimitServiceAddr", "envoy-ai-gateway-ratelimit.envoy-gateway-system",
 		"Host (or host:port) for the AI Gateway quota rate limit service. If no port is specified, 8081 is used.")
 	quotaRateLimitTimeout := fs.Int64("quotaRateLimitTimeout", 5,
@@ -305,7 +331,7 @@ func parseAndValidateFlags(args []string) (*flags, error) {
 		return nil, err
 	}
 
-	// The MCP session encryption seeds can be provided through environment variables so that they are
+	// The MCP session and file id encryption seeds can be provided through environment variables so that they are
 	// not exposed in the process command line. Explicitly set flags take precedence.
 	setFlags := map[string]bool{}
 	fs.Visit(func(f *flag.Flag) { setFlags[f.Name] = true })
@@ -314,6 +340,12 @@ func parseAndValidateFlags(args []string) (*flags, error) {
 	}
 	if v := os.Getenv(mcpFallbackSessionEncryptionSeedEnvVar); v != "" && !setFlags["mcpFallbackSessionEncryptionSeed"] {
 		*mcpFallbackSessionEncryptionSeed = v
+	}
+	if v := os.Getenv(fileIDEncryptionSeedEnvVar); v != "" && !setFlags["fileIDEncryptionSeed"] {
+		*fileIDEncryptionSeed = v
+	}
+	if v := os.Getenv(fileIDFallbackEncryptionSeedEnvVar); v != "" && !setFlags["fileIDFallbackEncryptionSeed"] {
+		*fileIDFallbackEncryptionSeed = v
 	}
 
 	var slogLevel slog.Level
@@ -332,6 +364,9 @@ func parseAndValidateFlags(args []string) (*flags, error) {
 		return nil, err
 	}
 	if err := internalapi.ValidateLogFormat(*extProcLogFormatPtr); err != nil {
+		return nil, fmt.Errorf("external processor: %w", err)
+	}
+	if err := internalapi.ValidateFalURLScheme(*extProcFalURLSchemePtr); err != nil {
 		return nil, fmt.Errorf("external processor: %w", err)
 	}
 
@@ -401,6 +436,15 @@ func parseAndValidateFlags(args []string) (*flags, error) {
 	if *mcpFallbackSessionEncryptionSeed != "" && *mcpFallbackSessionEncryptionIterations <= 0 {
 		return nil, fmt.Errorf("mcp fallback session encryption iterations must be positive: %d", *mcpFallbackSessionEncryptionIterations)
 	}
+	if *fileIDEncryptionSeed == "" {
+		return nil, errors.New("file id encryption seed must not be empty")
+	}
+	if *fileIDEncryptionIterations <= 0 {
+		return nil, fmt.Errorf("file id encryption iterations must be positive: %d", *fileIDEncryptionIterations)
+	}
+	if *fileIDFallbackEncryptionSeed != "" && *fileIDFallbackEncryptionIterations <= 0 {
+		return nil, fmt.Errorf("file id fallback encryption iterations must be positive: %d", *fileIDFallbackEncryptionIterations)
+	}
 
 	if *credentialPreRotationWindow <= 0 {
 		return nil, fmt.Errorf("credential pre-rotation window must be positive: %s", *credentialPreRotationWindow)
@@ -410,6 +454,7 @@ func parseAndValidateFlags(args []string) (*flags, error) {
 		envoyGatewayNamespace:                  *envoyGatewayNamespace,
 		extProcLogLevel:                        *extProcLogLevelPtr,
 		extProcLogFormat:                       *extProcLogFormatPtr,
+		extProcFalURLScheme:                    *extProcFalURLSchemePtr,
 		logFormat:                              *logFormatPtr,
 		extProcEnableRedaction:                 *extProcEnableRedactionPtr,
 		extProcImage:                           *extProcImagePtr,
@@ -439,6 +484,10 @@ func parseAndValidateFlags(args []string) (*flags, error) {
 		mcpFallbackSessionEncryptionSeed:       *mcpFallbackSessionEncryptionSeed,
 		mcpSessionEncryptionIterations:         *mcpSessionEncryptionIterations,
 		mcpFallbackSessionEncryptionIterations: *mcpFallbackSessionEncryptionIterations,
+		fileIDEncryptionSeed:                   *fileIDEncryptionSeed,
+		fileIDEncryptionIterations:             *fileIDEncryptionIterations,
+		fileIDFallbackEncryptionSeed:           *fileIDFallbackEncryptionSeed,
+		fileIDFallbackEncryptionIterations:     *fileIDFallbackEncryptionIterations,
 		quotaRateLimitServiceAddr:              *quotaRateLimitServiceAddr,
 		quotaRateLimitTimeout:                  *quotaRateLimitTimeout,
 		quotaRateLimitFailureModeDeny:          *quotaRateLimitFailureModeDeny,
@@ -545,6 +594,7 @@ func main() {
 		ExtProcImagePullPolicy:                 parsedFlags.extProcImagePullPolicy,
 		ExtProcLogLevel:                        parsedFlags.extProcLogLevel,
 		ExtProcLogFormat:                       parsedFlags.extProcLogFormat,
+		ExtProcFalURLScheme:                    parsedFlags.extProcFalURLScheme,
 		ExtProcEnableRedaction:                 parsedFlags.extProcEnableRedaction,
 		EnableLeaderElection:                   parsedFlags.enableLeaderElection,
 		UDSPath:                                extProcUDSPath,
@@ -561,6 +611,10 @@ func main() {
 		MCPSessionEncryptionIterations:         parsedFlags.mcpSessionEncryptionIterations,
 		MCPFallbackSessionEncryptionSeed:       parsedFlags.mcpFallbackSessionEncryptionSeed,
 		MCPFallbackSessionEncryptionIterations: parsedFlags.mcpFallbackSessionEncryptionIterations,
+		FileIDEncryptionSeed:                   parsedFlags.fileIDEncryptionSeed,
+		FileIDEncryptionIterations:             parsedFlags.fileIDEncryptionIterations,
+		FileIDFallbackEncryptionSeed:           parsedFlags.fileIDFallbackEncryptionSeed,
+		FileIDFallbackEncryptionIterations:     parsedFlags.fileIDFallbackEncryptionIterations,
 		RateLimitRunner:                        rlRunner,
 		CredentialPreRotationWindow:            parsedFlags.credentialPreRotationWindow,
 	}); err != nil {

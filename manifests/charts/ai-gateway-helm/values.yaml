@@ -33,10 +33,12 @@ endpointConfig:
   #   cohere: "/cohere"   # results in /cohere/v2/...
   #   anthropic: "/anthropic" # results in /anthropic/v1/...
   #   typesafe: "/typesafe"   # results in /typesafe/v1/...
+  #   fal: "/fal"             # results in /fal/run/... and /fal/queue/...
   openai: ""
   cohere: "/cohere"
   anthropic: "/anthropic"
   typesafe: "/typesafe"
+  fal: "/fal"
 
 extProc:
   image:
@@ -50,6 +52,9 @@ extProc:
   # Log output format. One of "text" or "json". Set to "json" when logs are ingested by a pipeline
   # that parses structured records, such as Cloud Logging, Loki, Datadog or ELK.
   logFormat: text
+  # Scheme of the gateway URLs that replace fal URLs in fal responses. One of "https" or "http".
+  # Empty uses the request's x-forwarded-proto, else its :scheme.
+  falURLScheme: ""
   # Enable redaction of sensitive information in debug logs (only takes effect when logLevel is "debug").
   enableRedaction: false
 
@@ -333,6 +338,33 @@ controller:
         seed: ""
         # Number of PBKDF2 iterations to use for deriving the MCP session encryption key with the fallback seed.
         iterations: 100000
+
+  # Configuration for encrypting the ids returned by the OpenAI Files/Batch APIs. The ids embed the
+  # backend and the provider-native id, so the seed must stay stable: changing it without setting
+  # fallback.seed to the previous value invalidates every previously issued file/batch id.
+  fileIDEncryption:
+    # Seed used to derive the id encryption key.
+    # When empty (the default), the chart generates a random seed on install, stores it in a Secret
+    # named "<controller fullname>-file-id-encryption", and reuses it on upgrades.
+    # Never use a well-known value such as "default-insecure-seed".
+    seed: ""
+    # Name of an existing Secret in the release namespace that holds the seed under the "seed" key.
+    # When set, the chart does not create a Secret and ignores the seed value above.
+    # Use this with "helm template" based tooling (for example GitOps), which cannot look up a
+    # previously generated seed and would otherwise generate a new one on every render.
+    existingSecret: ""
+    # Number of PBKDF2 iterations to use for deriving the id encryption key.
+    iterations: 100000
+    # Optional fallback configuration for id encryption key rotation.
+    fallback:
+      # The previous seed. Ids that fail to decode with the current seed are retried with this one.
+      # The chart stores it in a Secret named "<controller fullname>-file-id-encryption-fallback".
+      # While it is set, the controller is restarted on every "helm upgrade" so that changes to either seed take
+      # effect. When it is not set, restart the controller manually after changing the seed
+      # (e.g. "kubectl rollout restart deployment/<controller fullname>").
+      seed: ""
+      # Number of PBKDF2 iterations used with the fallback seed.
+      iterations: 100000
 
 # Configuration for the Envoy Gateway component that AI Gateway relies on to program Envoy.
 envoyGateway:

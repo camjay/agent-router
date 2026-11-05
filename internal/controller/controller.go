@@ -106,8 +106,19 @@ type Options struct {
 	MCPFallbackSessionEncryptionSeed string
 	// MCPFallbackSessionEncryptionIterations is the number of iterations used in the fallback PBKDF2 key derivation for MCP session encryption.
 	MCPFallbackSessionEncryptionIterations int
+	// FileIDEncryptionSeed is the seed used to derive the encryption key for Files/Batch API ids.
+	FileIDEncryptionSeed string
+	// FileIDEncryptionIterations is the number of PBKDF2 iterations for Files/Batch API id encryption.
+	FileIDEncryptionIterations int
+	// FileIDFallbackEncryptionSeed is the optional fallback seed used for Files/Batch API id key rotation.
+	FileIDFallbackEncryptionSeed string
+	// FileIDFallbackEncryptionIterations is the number of PBKDF2 iterations for the fallback seed.
+	FileIDFallbackEncryptionIterations int
 	// EndpointPrefixes is the comma-separated key-value pairs for endpoint prefixes.
 	EndpointPrefixes string
+	// ExtProcFalURLScheme is the scheme of the gateway URLs that replace fal URLs in responses, "https" or "http".
+	// Empty means the scheme of each request.
+	ExtProcFalURLScheme string
 	// RateLimitRunner is the xDS runner that serves rate limit configs to the rate limit service.
 	RateLimitRunner *runner.Runner
 	// EnvoyGatewayNamespace is the namespace where Envoy Gateway is deployed.
@@ -542,6 +553,8 @@ func backendSecurityPolicySecretRef(bsp *aigv1b1.BackendSecurityPolicy) (name, n
 		secretRef = bsp.Spec.AzureAPIKey.SecretRef
 	case aigv1b1.BackendSecurityPolicyTypeAnthropicAPIKey:
 		secretRef = bsp.Spec.AnthropicAPIKey.SecretRef
+	case aigv1b1.BackendSecurityPolicyTypeFalAPIKey:
+		secretRef = bsp.Spec.FalAPIKey.SecretRef
 	case aigv1b1.BackendSecurityPolicyTypeAzureCredentials:
 		if bsp.Spec.AzureCredentials.ClientSecretRef != nil {
 			secretRef = bsp.Spec.AzureCredentials.ClientSecretRef

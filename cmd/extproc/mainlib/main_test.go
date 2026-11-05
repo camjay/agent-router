@@ -67,6 +67,7 @@ func Test_parseAndValidateFlags(t *testing.T) {
 			rootPrefix       string
 			logLevel         slog.Level
 			logFormat        string
+			falURLScheme     string
 			enableRedaction  bool
 		}{
 			{
@@ -88,6 +89,15 @@ func Test_parseAndValidateFlags(t *testing.T) {
 				logLevel:         slog.LevelInfo,
 				logFormat:        "json",
 				enableRedaction:  false,
+			},
+			{
+				name:             "fal URL scheme http",
+				args:             []string{"-configBundlePath", "/path/to/config-bundle", "-falURLScheme", "http"},
+				configBundlePath: "/path/to/config-bundle",
+				addr:             ":1063",
+				rootPrefix:       "/",
+				logLevel:         slog.LevelInfo,
+				falURLScheme:     "http",
 			},
 			{
 				name:             "custom addr",
@@ -228,6 +238,7 @@ func Test_parseAndValidateFlags(t *testing.T) {
 					wantLogFormat = "text"
 				}
 				require.Equal(t, wantLogFormat, flags.logFormat)
+				require.Equal(t, tc.falURLScheme, flags.falURLScheme)
 				require.Equal(t, tc.enableRedaction, flags.enableRedaction)
 				require.Equal(t, tc.rootPrefix, flags.rootPrefix)
 			})
@@ -251,9 +262,14 @@ func Test_parseAndValidateFlags(t *testing.T) {
 				expectedError: `invalid log format: "yaml", must be "text" or "json"`,
 			},
 			{
+				name:          "invalid fal URL scheme",
+				args:          []string{"-configBundlePath", "/path/to/config-bundle", "-falURLScheme", "ftp"},
+				expectedError: `invalid fal URL scheme: "ftp", must be empty, "https" or "http"`,
+			},
+			{
 				name:          "invalid endpoint prefixes - unknown key",
 				args:          []string{"-configBundlePath", "/path/to/config-bundle", "-endpointPrefixes", "foo:/x"},
-				expectedError: "failed to parse endpoint prefixes: unknown endpointPrefixes key \"foo\" at position 1 (allowed: openai, cohere, anthropic, typesafe)",
+				expectedError: "failed to parse endpoint prefixes: unknown endpointPrefixes key \"foo\" at position 1 (allowed: openai, cohere, anthropic, typesafe, fal)",
 			},
 			{
 				name:          "invalid endpoint prefixes - missing colon",
@@ -436,7 +452,45 @@ func TestInsecureSeedWarner(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			var buf bytes.Buffer
 			rcv := &recordingConfigReceiver{}
-			w := &insecureSeedWarner{ConfigReceiver: rcv, l: slog.New(slog.NewTextHandler(&buf, nil)), flagSeed: tc.flagSeed}
+			w := newMCPSeedWarner(rcv, slog.New(slog.NewTextHandler(&buf, nil)), tc.flagSeed)
+			require.NoError(t, w.LoadConfig(t.Context(), tc.config))
+			require.NoError(t, w.LoadConfig(t.Context(), tc.config))
+			require.Equal(t, 2, rcv.loaded)
+			if tc.expWarn {
+				require.Equal(t, 1, strings.Count(buf.String(), warning), "should warn exactly once")
+			} else {
+				require.NotContains(t, buf.String(), warning)
+			}
+		})
+	}
+}
+
+func TestInsecureSeedWarner_FileID(t *testing.T) {
+	const warning = "Files/Batch API id encryption seed is set to the well-known default value"
+	for _, tc := range []struct {
+		name     string
+		flagSeed string
+		config   *filterapi.Config
+		expWarn  bool
+	}{
+		{name: "default flag seed, no config seed", flagSeed: defaultInsecureMCPSessionEncryptionSeed, config: &filterapi.Config{}, expWarn: true},
+		{
+			name:     "default flag seed, secure config seed",
+			flagSeed: defaultInsecureMCPSessionEncryptionSeed,
+			config:   &filterapi.Config{FileIDEncryption: &filterapi.FileIDEncryption{Seed: "secure", Iterations: 100}},
+		},
+		{
+			name:     "secure flag seed, default config seed",
+			flagSeed: "secure",
+			config:   &filterapi.Config{FileIDEncryption: &filterapi.FileIDEncryption{Seed: defaultInsecureMCPSessionEncryptionSeed, Iterations: 100}},
+			expWarn:  true,
+		},
+		{name: "secure flag seed, no config seed", flagSeed: "secure", config: &filterapi.Config{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			rcv := &recordingConfigReceiver{}
+			w := newFileIDSeedWarner(rcv, slog.New(slog.NewTextHandler(&buf, nil)), tc.flagSeed)
 			require.NoError(t, w.LoadConfig(t.Context(), tc.config))
 			require.NoError(t, w.LoadConfig(t.Context(), tc.config))
 			require.Equal(t, 2, rcv.loaded)
