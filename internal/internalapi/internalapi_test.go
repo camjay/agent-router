@@ -12,14 +12,58 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestOAuthProtectedResourceMetadataURL(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		resource string
+		want     string
+	}{
+		{
+			name:     "path component is appended after the well-known path",
+			resource: "https://api.example.com/mcp",
+			want:     "https://api.example.com/.well-known/oauth-protected-resource/mcp",
+		},
+		{
+			name:     "port is preserved in the authority",
+			resource: "https://api.example.com:8443/tenant/mcp",
+			want:     "https://api.example.com:8443/.well-known/oauth-protected-resource/tenant/mcp",
+		},
+		{
+			name:     "trailing slash is dropped",
+			resource: "https://api.example.com/mcp/",
+			want:     "https://api.example.com/.well-known/oauth-protected-resource/mcp",
+		},
+		{
+			name:     "no path component",
+			resource: "https://api.example.com",
+			want:     "https://api.example.com/.well-known/oauth-protected-resource",
+		},
+		{
+			name:     "root path",
+			resource: "http://api.example.com/",
+			want:     "http://api.example.com/.well-known/oauth-protected-resource",
+		},
+		{
+			name:     "no scheme",
+			resource: "api.example.com/mcp",
+			want:     "api.example.com/.well-known/oauth-protected-resource/mcp",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			require.Equal(t, tc.want, OAuthProtectedResourceMetadataURL(tc.resource))
+		})
+	}
+}
+
 func TestParseEndpointPrefixes_Success(t *testing.T) {
-	in := "openai:/foo,cohere:/1/2/3,anthropic:/cat,typesafe:/ts"
+	in := "openai:/foo,cohere:/1/2/3,anthropic:/cat,typesafe:/ts,fal:/gen"
 	ep, err := ParseEndpointPrefixes(in)
 	require.NoError(t, err)
 	require.Equal(t, "/foo", ep.OpenAI)
 	require.Equal(t, "/1/2/3", ep.Cohere)
 	require.Equal(t, "/cat", ep.Anthropic)
 	require.Equal(t, "/ts", ep.TypeSafe)
+	require.Equal(t, "/gen", ep.Fal)
 }
 
 func TestParseEndpointPrefixes_EmptyInput(t *testing.T) {
@@ -29,6 +73,7 @@ func TestParseEndpointPrefixes_EmptyInput(t *testing.T) {
 	require.Equal(t, "/cohere", ep.Cohere)
 	require.Equal(t, "/anthropic", ep.Anthropic)
 	require.Equal(t, "/typesafe", ep.TypeSafe)
+	require.Equal(t, "/fal", ep.Fal)
 }
 
 func TestParseEndpointPrefixes_UnknownKey(t *testing.T) {
@@ -53,6 +98,29 @@ func TestParseEndpointPrefixes_EmptyPair(t *testing.T) {
 	_, err := ParseEndpointPrefixes("openai:/,,cohere:/cohere")
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "empty endpointPrefixes pair at position 2")
+}
+
+func TestValidateFalURLScheme(t *testing.T) {
+	tests := []struct {
+		name   string
+		scheme string
+		expErr string
+	}{
+		{name: "https", scheme: "https"},
+		{name: "http", scheme: "http"},
+		{name: "empty", scheme: ""},
+		{name: "uppercase", scheme: "HTTPS", expErr: `invalid fal URL scheme: "HTTPS", must be empty, "https" or "http"`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := ValidateFalURLScheme(tt.scheme)
+			if tt.expErr != "" {
+				require.EqualError(t, err, tt.expErr)
+				return
+			}
+			require.NoError(t, err)
+		})
+	}
 }
 
 func TestPerRouteRuleRefBackendName(t *testing.T) {

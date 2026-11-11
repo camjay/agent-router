@@ -73,6 +73,7 @@ func Test_parseAndValidateFlags(t *testing.T) {
 		require.Equal(t, "envoy-gateway-system", f.envoyGatewayNamespace)
 		require.Equal(t, "info", f.extProcLogLevel)
 		require.Equal(t, "text", f.extProcLogFormat)
+		require.Empty(t, f.extProcFalURLScheme)
 		require.Equal(t, "text", f.logFormat)
 		require.False(t, f.extProcEnableRedaction)
 		require.Equal(t, "docker.io/envoyproxy/ai-gateway-extproc:latest", f.extProcImage)
@@ -103,6 +104,7 @@ func Test_parseAndValidateFlags(t *testing.T) {
 					tc.dash + "envoyGatewayNamespace=eg-system",
 					tc.dash + "extProcLogLevel=debug",
 					tc.dash + "extProcLogFormat=json",
+					tc.dash + "extProcFalURLScheme=http",
 					tc.dash + "logFormat=json",
 					tc.dash + "extProcEnableRedaction=true",
 					tc.dash + "extProcImage=example.com/extproc:latest",
@@ -129,6 +131,7 @@ func Test_parseAndValidateFlags(t *testing.T) {
 				require.Equal(t, "eg-system", f.envoyGatewayNamespace)
 				require.Equal(t, "debug", f.extProcLogLevel)
 				require.Equal(t, "json", f.extProcLogFormat)
+				require.Equal(t, "http", f.extProcFalURLScheme)
 				require.Equal(t, "json", f.logFormat)
 				require.True(t, f.extProcEnableRedaction)
 				require.Equal(t, "example.com/extproc:latest", f.extProcImage)
@@ -228,6 +231,11 @@ func Test_parseAndValidateFlags(t *testing.T) {
 				name:   "invalid extproc log format",
 				flags:  []string{"--extProcLogFormat=yaml"},
 				expErr: `external processor: invalid log format: "yaml", must be "text" or "json"`,
+			},
+			{
+				name:   "invalid extproc fal URL scheme",
+				flags:  []string{"--extProcFalURLScheme=ftp"},
+				expErr: `external processor: invalid fal URL scheme: "ftp", must be empty, "https" or "http"`,
 			},
 			{
 				name:   "invalid mcp session encryption iterations",
@@ -386,6 +394,42 @@ func Test_parseAndValidateFlags_mcpSessionEncryptionSeedEnvVars(t *testing.T) {
 		t.Setenv(mcpFallbackSessionEncryptionSeedEnvVar, "env-fallback-seed")
 		_, err := parseAndValidateFlags([]string{"--mcpFallbackSessionEncryptionIterations=0"})
 		require.ErrorContains(t, err, "mcp fallback session encryption iterations must be positive")
+	})
+}
+
+func Test_parseAndValidateFlags_fileIDEncryptionSeedEnvVars(t *testing.T) {
+	t.Run("from env vars", func(t *testing.T) {
+		t.Setenv(fileIDEncryptionSeedEnvVar, "env-seed")
+		t.Setenv(fileIDFallbackEncryptionSeedEnvVar, "env-fallback-seed")
+		f, err := parseAndValidateFlags([]string{"--fileIDFallbackEncryptionIterations=200"})
+		require.NoError(t, err)
+		require.Equal(t, "env-seed", f.fileIDEncryptionSeed)
+		require.Equal(t, "env-fallback-seed", f.fileIDFallbackEncryptionSeed)
+		require.Equal(t, 200, f.fileIDFallbackEncryptionIterations)
+	})
+	t.Run("flags take precedence", func(t *testing.T) {
+		t.Setenv(fileIDEncryptionSeedEnvVar, "env-seed")
+		t.Setenv(fileIDFallbackEncryptionSeedEnvVar, "env-fallback-seed")
+		f, err := parseAndValidateFlags([]string{
+			"--fileIDEncryptionSeed=flag-seed",
+			"--fileIDFallbackEncryptionSeed=flag-fallback-seed",
+		})
+		require.NoError(t, err)
+		require.Equal(t, "flag-seed", f.fileIDEncryptionSeed)
+		require.Equal(t, "flag-fallback-seed", f.fileIDFallbackEncryptionSeed)
+	})
+	t.Run("empty env vars are ignored", func(t *testing.T) {
+		t.Setenv(fileIDEncryptionSeedEnvVar, "")
+		t.Setenv(fileIDFallbackEncryptionSeedEnvVar, "")
+		f, err := parseAndValidateFlags(nil)
+		require.NoError(t, err)
+		require.Equal(t, "default-insecure-seed", f.fileIDEncryptionSeed)
+		require.Empty(t, f.fileIDFallbackEncryptionSeed)
+	})
+	t.Run("fallback iterations are validated for the env var seed", func(t *testing.T) {
+		t.Setenv(fileIDFallbackEncryptionSeedEnvVar, "env-fallback-seed")
+		_, err := parseAndValidateFlags([]string{"--fileIDFallbackEncryptionIterations=0"})
+		require.ErrorContains(t, err, "file id fallback encryption iterations must be positive")
 	})
 }
 

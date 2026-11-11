@@ -112,6 +112,49 @@ var MCPInternalHeadersToMetadata = map[string]string{
 	MCPMetadataHeaderResourceURI: "mcp_resource_uri",
 }
 
+// OAuthProtectedResourceMetadataPath is the well-known path prefix that serves the OAuth
+// Protected Resource Metadata document.
+//
+// References:
+// * https://datatracker.ietf.org/doc/html/rfc9728#name-protected-resource-metadata
+// * https://modelcontextprotocol.io/specification/2025-06-18/basic/authorization#authorization-server-location
+const OAuthProtectedResourceMetadataPath = "/.well-known/oauth-protected-resource"
+
+// OAuthProtectedResourceMetadataURL returns the URL of the Protected Resource Metadata document
+// for an RFC 9728 resource identifier, by inserting the well-known path between the identifier's
+// authority and its path component. A trailing slash on the identifier is dropped first.
+//
+// The controller uses it for the 401 challenge of a route that pins its resource, and the MCP
+// proxy for the 403 challenge, so both advertise the same URL for the same identifier.
+//
+// References:
+// * https://datatracker.ietf.org/doc/html/rfc9728#name-www-authenticate-response
+// * https://modelcontextprotocol.io/specification/2025-11-25/basic/authorization#protected-resource-metadata-discovery-requirements
+func OAuthProtectedResourceMetadataURL(resource string) string {
+	resourceURL := strings.TrimSuffix(resource, "/")
+
+	prefixLen := 0
+	switch {
+	case strings.HasPrefix(resourceURL, "https://"):
+		prefixLen = len("https://")
+	case strings.HasPrefix(resourceURL, "http://"):
+		prefixLen = len("http://")
+	}
+
+	baseURL, pathComponent := resourceURL, ""
+	if idx := strings.IndexByte(resourceURL[prefixLen:], '/'); idx != -1 {
+		baseURL = resourceURL[:prefixLen+idx]
+		pathComponent = resourceURL[prefixLen+idx:]
+	}
+
+	// Some agents do not expect the path component to be included in the resource_metadata URL, but according to the
+	// spec https://mcp.mintlify.app/specification/2025-11-25/basic/authorization#protected-resource-metadata-discovery-requirements
+	// they should honor the value returned here.
+	// We can't expose these resource at the root, because there may be multiple MCP routes with different OAuth settings, so we need
+	// to rely on clients properly implementing the spec and using this value returned in the header.
+	return baseURL + OAuthProtectedResourceMetadataPath + pathComponent
+}
+
 const (
 	// LogFormatText selects human-readable log output. This is the default for every binary.
 	LogFormatText = "text"
@@ -124,6 +167,21 @@ const (
 func ValidateLogFormat(format string) error {
 	if format != LogFormatText && format != LogFormatJSON {
 		return fmt.Errorf("invalid log format: %q, must be %q or %q", format, LogFormatText, LogFormatJSON)
+	}
+	return nil
+}
+
+const (
+	// FalURLSchemeHTTPS forces https for the gateway URLs that replace fal URLs in responses.
+	FalURLSchemeHTTPS = "https"
+	// FalURLSchemeHTTP forces http for the gateway URLs that replace fal URLs in responses.
+	FalURLSchemeHTTP = "http"
+)
+
+// ValidateFalURLScheme checks that scheme is empty, meaning the request's scheme, or a supported override.
+func ValidateFalURLScheme(scheme string) error {
+	if scheme != "" && scheme != FalURLSchemeHTTPS && scheme != FalURLSchemeHTTP {
+		return fmt.Errorf("invalid fal URL scheme: %q, must be empty, %q or %q", scheme, FalURLSchemeHTTPS, FalURLSchemeHTTP)
 	}
 	return nil
 }
@@ -161,6 +219,17 @@ func AIServiceBackendName(perRouteRuleRefBackendName string) string {
 		return parts[0] + "/" + parts[1]
 	}
 	return perRouteRuleRefBackendName
+}
+
+// NamespaceAndNameFromBackendName parses the AIServiceBackend namespace and name from a
+// composite backend name produced by PerRouteRuleRefBackendName ("<ns>/<name>/route/...").
+// It returns ok=false if the input is not in the expected form.
+func NamespaceAndNameFromBackendName(backendName string) (namespace, name string, ok bool) {
+	parts := strings.SplitN(backendName, "/", 3)
+	if len(parts) < 2 || parts[0] == "" || parts[1] == "" {
+		return "", "", false
+	}
+	return parts[0], parts[1], true
 }
 
 // awsBedrockHostRE matches an AWS Bedrock runtime host — public, FIPS, PrivateLink (VPCE), or the
@@ -278,6 +347,8 @@ type EndpointPrefixes struct {
 	Anthropic string
 	// TypeSafe defaults to "/typesafe"
 	TypeSafe string
+	// Fal defaults to "/fal"
+	Fal string
 }
 
 // ParseEndpointPrefixes parses a comma-separated list of key:value pairs to populate EndpointPrefixes.
@@ -287,10 +358,11 @@ type EndpointPrefixes struct {
 //   - cohere
 //   - anthropic
 //   - typesafe
+//   - fal
 //
 // Format example:
 //
-//	"openai:/,cohere:/cohere,anthropic:/anthropic,typesafe:/typesafe"
+//	"openai:/,cohere:/cohere,anthropic:/anthropic,typesafe:/typesafe,fal:/fal"
 //
 // Unknown keys cause an error; values must be non-empty.
 func ParseEndpointPrefixes(s string) (EndpointPrefixes, error) {
@@ -299,6 +371,7 @@ func ParseEndpointPrefixes(s string) (EndpointPrefixes, error) {
 		Cohere:    "/cohere",
 		Anthropic: "/anthropic",
 		TypeSafe:  "/typesafe",
+		Fal:       "/fal",
 	}
 	if s == "" {
 		return out, nil
@@ -328,8 +401,10 @@ func ParseEndpointPrefixes(s string) (EndpointPrefixes, error) {
 			out.Anthropic = value
 		case "typesafe":
 			out.TypeSafe = value
+		case "fal":
+			out.Fal = value
 		default:
-			return EndpointPrefixes{}, fmt.Errorf("unknown endpointPrefixes key %q at position %d (allowed: openai, cohere, anthropic, typesafe)", key, i+1)
+			return EndpointPrefixes{}, fmt.Errorf("unknown endpointPrefixes key %q at position %d (allowed: openai, cohere, anthropic, typesafe, fal)", key, i+1)
 		}
 	}
 	return out, nil

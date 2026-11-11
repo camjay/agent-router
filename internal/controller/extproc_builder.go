@@ -67,6 +67,7 @@ func newExtProcBuilder(options *Options, extProcAsSideCar bool, logger logr.Logg
 		logRequestHeaderAttributes:             options.LogRequestHeaderAttributes,
 		rootPrefix:                             options.RootPrefix,
 		endpointPrefixes:                       options.EndpointPrefixes,
+		falURLScheme:                           options.ExtProcFalURLScheme,
 		extraEnvVars:                           parsedEnvVars,
 		imagePullSecrets:                       parsedImagePullSecrets,
 		maxRecvMsgSize:                         options.ExtProcMaxRecvMsgSize,
@@ -75,6 +76,10 @@ func newExtProcBuilder(options *Options, extProcAsSideCar bool, logger logr.Logg
 		mcpSessionEncryptionIterations:         options.MCPSessionEncryptionIterations,
 		mcpFallbackSessionEncryptionSeed:       options.MCPFallbackSessionEncryptionSeed,
 		mcpFallbackSessionEncryptionIterations: options.MCPFallbackSessionEncryptionIterations,
+		fileIDEncryptionSeed:                   options.FileIDEncryptionSeed,
+		fileIDEncryptionIterations:             options.FileIDEncryptionIterations,
+		fileIDFallbackEncryptionSeed:           options.FileIDFallbackEncryptionSeed,
+		fileIDFallbackEncryptionIterations:     options.FileIDFallbackEncryptionIterations,
 	}
 }
 
@@ -95,6 +100,7 @@ type extProcBuilder struct {
 
 	rootPrefix       string
 	endpointPrefixes string
+	falURLScheme     string
 
 	extraEnvVars     []corev1.EnvVar
 	imagePullSecrets []corev1.LocalObjectReference
@@ -105,6 +111,11 @@ type extProcBuilder struct {
 	mcpSessionEncryptionIterations         int
 	mcpFallbackSessionEncryptionSeed       string
 	mcpFallbackSessionEncryptionIterations int
+
+	fileIDEncryptionSeed               string
+	fileIDEncryptionIterations         int
+	fileIDFallbackEncryptionSeed       string
+	fileIDFallbackEncryptionIterations int
 }
 
 // extProcContainerInput is the per-gateway input for extproc injection.
@@ -219,6 +230,23 @@ func (b *extProcBuilder) mcpSessionEncryption() *filterapi.MCPSessionEncryption 
 	return e
 }
 
+// fileIDEncryption returns the Files/Batch API id encryption configuration to deliver to the
+// extproc through the filter config, or nil if no seed is configured.
+func (b *extProcBuilder) fileIDEncryption() *filterapi.FileIDEncryption {
+	if b == nil || b.fileIDEncryptionSeed == "" {
+		return nil
+	}
+	e := &filterapi.FileIDEncryption{
+		Seed:       b.fileIDEncryptionSeed,
+		Iterations: b.fileIDEncryptionIterations,
+	}
+	if b.fileIDFallbackEncryptionSeed != "" {
+		e.FallbackSeed = b.fileIDFallbackEncryptionSeed
+		e.FallbackIterations = b.fileIDFallbackEncryptionIterations
+	}
+	return e
+}
+
 // extProcConfigDigest contains the config inputs that affect extproc injection.
 // It intentionally avoids hashing the full Kubernetes Container API object.
 type extProcConfigDigest struct {
@@ -242,6 +270,7 @@ type extProcConfigDigest struct {
 	ExtProcAsSideCar               bool
 	NeedMCP                        bool
 	GatewayConfigExtProc           *aigv1b1.GatewayConfigExtProc
+	FalURLScheme                   string `json:",omitempty"`
 }
 
 // extProcContainerHash returns a stable hash of the extproc injection inputs.
@@ -265,6 +294,7 @@ func (b *extProcBuilder) extProcContainerHash(input extProcContainerInput) strin
 		ExtProcAsSideCar:               b.extProcAsSideCar,
 		NeedMCP:                        input.needMCP,
 		GatewayConfigExtProc:           extProcSpecFromInput(input),
+		FalURLScheme:                   b.falURLScheme,
 	}
 	marshaled, _ := stdjson.Marshal(digest)
 	sum := sha256.Sum256(marshaled)
@@ -304,6 +334,8 @@ func (b *extProcBuilder) buildExtProcBaseArgs(needMCP bool) []string {
 		"-rootPrefix", b.rootPrefix,
 		"-maxRecvMsgSize", fmt.Sprintf("%d", b.maxRecvMsgSize),
 	}
+	// The Files/Batch API id encryption seeds are not passed as arguments, for the same reason as
+	// the MCP seeds below. They are delivered in the filter config Secrets (see fileIDEncryption).
 	if f := b.nonDefaultLogFormat(); f != "" {
 		args = append(args, "-logFormat", f)
 	}
@@ -328,6 +360,9 @@ func (b *extProcBuilder) buildExtProcBaseArgs(needMCP bool) []string {
 	}
 	if b.endpointPrefixes != "" {
 		args = append(args, "-endpointPrefixes", b.endpointPrefixes)
+	}
+	if b.falURLScheme != "" {
+		args = append(args, "-falURLScheme", b.falURLScheme)
 	}
 	if b.enableRedaction {
 		args = append(args, "-enableRedaction")

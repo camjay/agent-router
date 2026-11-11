@@ -133,6 +133,8 @@ func newTestGatewayController(c client.Client, kube kubernetes.Interface, logger
 		MCPSessionEncryptionIterations:         100,
 		MCPFallbackSessionEncryptionSeed:       "fallback",
 		MCPFallbackSessionEncryptionIterations: 200,
+		FileIDEncryptionSeed:                   "file-seed",
+		FileIDEncryptionIterations:             100,
 	}
 	return NewGatewayController(c, kube, logger, ns, standAlone, uuidFn, opts, extProcAsSideCar)
 }
@@ -1599,6 +1601,17 @@ func TestGatewayController_bspToFilterAPIBackendAuth_CrossNamespaceSecret(t *tes
 			cred: func(auth *filterapi.BackendAuth) string { return auth.AnthropicAPIKey.Key },
 		},
 		{
+			name:    "FalAPIKey",
+			dataKey: apiKeyInSecret,
+			spec: func(ref *gwapiv1.SecretObjectReference) aigv1b1.BackendSecurityPolicySpec {
+				return aigv1b1.BackendSecurityPolicySpec{
+					Type:      aigv1b1.BackendSecurityPolicyTypeFalAPIKey,
+					FalAPIKey: &aigv1b1.BackendSecurityPolicyFalAPIKey{SecretRef: ref},
+				}
+			},
+			cred: func(auth *filterapi.BackendAuth) string { return auth.FalAPIKey.Key },
+		},
+		{
 			name:    "AWSCredentialsFile",
 			dataKey: rotators.AwsCredentialsKey,
 			spec: func(ref *gwapiv1.SecretObjectReference) aigv1b1.BackendSecurityPolicySpec {
@@ -1728,6 +1741,18 @@ func TestResolveCredentialOverride(t *testing.T) {
 		)
 		require.NoError(t, err)
 		require.Equal(t, "x-aigw-anthropic-api-key", result.HeaderName)
+	})
+
+	t.Run("fromRequestHeaders default header for FalAPIKey", func(t *testing.T) {
+		result, err := resolveCredentialOverride(
+			aigv1b1.BackendSecurityPolicyTypeFalAPIKey,
+			&aigv1b1.BackendSecurityPolicyCredentialOverride{
+				FromRequestHeaders: &aigv1b1.CredentialOverrideFromRequestHeaders{},
+			},
+			true,
+		)
+		require.NoError(t, err)
+		require.Equal(t, "x-aigw-fal-api-key", result.HeaderName)
 	})
 
 	t.Run("fromDynamicMetadata", func(t *testing.T) {
@@ -3692,6 +3717,8 @@ func TestGatewayController_reconcileFilterMCPConfigSecret(t *testing.T) {
 		FallbackSeed:       "fallback",
 		FallbackIterations: 200,
 	}, cfg.MCPConfig.SessionEncryption)
+	// The file id encryption config is delivered through the filter config Secrets as well.
+	require.Equal(t, &filterapi.FileIDEncryption{Seed: "file-seed", Iterations: 100}, cfg.FileIDEncryption)
 }
 
 func TestGatewayController_writeFilterConfigBundleShards(t *testing.T) {
@@ -4069,6 +4096,72 @@ func Test_mcpConfig_APIKeyForwardClientIDHeader(t *testing.T) {
 		require.True(t, effective)
 		require.Len(t, mc.Routes, 1)
 		require.Equal(t, []string{"x-mcp-client-id"}, mc.Routes[0].ForwardHeaders)
+	})
+}
+
+func Test_mcpConfig_OAuth(t *testing.T) {
+	newRoute := func(sp *aigv1b1.MCPRouteSecurityPolicy) []aigv1b1.MCPRoute {
+		return []aigv1b1.MCPRoute{{
+			ObjectMeta: metav1.ObjectMeta{Name: "r", Namespace: "ns"},
+			Spec: aigv1b1.MCPRouteSpec{
+				BackendRefs:    []aigv1b1.MCPRouteBackendRef{{BackendObjectReference: gwapiv1.BackendObjectReference{Name: "b"}}},
+				SecurityPolicy: sp,
+			},
+		}}
+	}
+
+	t.Run("full metadata is propagated to the proxy", func(t *testing.T) {
+		mc, effective := mcpConfig(newRoute(&aigv1b1.MCPRouteSecurityPolicy{
+			OAuth: &aigv1b1.MCPRouteOAuth{
+				Issuer: "https://auth.example.com",
+				ProtectedResourceMetadata: aigv1b1.ProtectedResourceMetadata{
+					ResourceName:                      ptr.To("My MCP Tools"),
+					ScopesSupported:                   []string{"read", "write"},
+					ResourceSigningAlgValuesSupported: []string{"RS256"},
+					ResourceDocumentation:             ptr.To("https://docs.example.com"),
+					ResourcePolicyURI:                 ptr.To("https://policy.example.com"),
+				},
+			},
+		}))
+		require.True(t, effective)
+		require.Equal(t, &filterapi.MCPRouteOAuthProtectedResourceMetadata{
+			Issuer:                            "https://auth.example.com",
+			ResourceName:                      "My MCP Tools",
+			ScopesSupported:                   []string{"read", "write"},
+			ResourceSigningAlgValuesSupported: []string{"RS256"},
+			ResourceDocumentation:             "https://docs.example.com",
+			ResourcePolicyURI:                 "https://policy.example.com",
+		}, mc.Routes[0].ProtectedResourceMetadata)
+		// Resource is left empty so the proxy derives it per request.
+		require.Empty(t, mc.Routes[0].ProtectedResourceMetadata.Resource)
+	})
+
+	t.Run("an explicitly configured resource is carried through as an override", func(t *testing.T) {
+		mc, _ := mcpConfig(newRoute(&aigv1b1.MCPRouteSecurityPolicy{
+			OAuth: &aigv1b1.MCPRouteOAuth{
+				Issuer: "https://auth.example.com",
+				ProtectedResourceMetadata: aigv1b1.ProtectedResourceMetadata{
+					Resource: "https://api.example.com/mcp",
+				},
+			},
+		}))
+		require.Equal(t, "https://api.example.com/mcp", mc.Routes[0].ProtectedResourceMetadata.Resource)
+	})
+
+	t.Run("OAuth without authorization rules still serves metadata", func(t *testing.T) {
+		// The metadata document must be served whenever OAuth is configured, independently of
+		// whether the route also defines authorization rules.
+		mc, _ := mcpConfig(newRoute(&aigv1b1.MCPRouteSecurityPolicy{
+			OAuth: &aigv1b1.MCPRouteOAuth{Issuer: "https://auth.example.com"},
+		}))
+		require.Nil(t, mc.Routes[0].Authorization)
+		require.NotNil(t, mc.Routes[0].ProtectedResourceMetadata)
+		require.Equal(t, "https://auth.example.com", mc.Routes[0].ProtectedResourceMetadata.Issuer)
+	})
+
+	t.Run("no OAuth configured", func(t *testing.T) {
+		mc, _ := mcpConfig(newRoute(nil))
+		require.Nil(t, mc.Routes[0].ProtectedResourceMetadata)
 	})
 }
 
